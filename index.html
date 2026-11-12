@@ -123,6 +123,11 @@ html.big .chart-box { height: 380px; }
 .quiz .fb { margin-top: 10px; font-size: .95rem; }
 .quiz + .quiz { margin-top: 18px; padding-top: 18px; border-top: 1px dashed var(--line); }
 
+.ctl-group { font-size: 1rem; margin: 0 0 12px; }
+.controls + .ctl-group { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.phase-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.phase { display: grid; gap: 12px; align-content: start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.phase h4 { margin: 0; font-family: var(--font-display); font-size: .95rem; }
 .navrow { display: flex; justify-content: space-between; gap: 12px; }
 .primary { border: 0; background: var(--accent); color: var(--surface); border-radius: 8px; padding: 10px 18px; font-weight: 700; cursor: pointer; }
 .primary:disabled { opacity: .4; cursor: default; }
@@ -168,18 +173,25 @@ const Engine = (() => {
   // ---------- Accumulation (Step 1) ----------
   // p: {salary, raise, startAge, retireAge, saveStart, saveEnd, myPct, matchPct,
   //     rAggr, rNorm, rCons, consYears, current, tax, lossAge?, lossPct?}
+  // Lifecycle strategy: each phase starts at its own age; the most recently started phase applies.
+  // Before the earliest start age, the earliest phase applies. (Workbook: aggressive 25, normal 35, conservative 59.)
+  function phaseOf(p, age) {
+    const ph = [['aggr', p.aggrStart], ['norm', p.normStart], ['cons', p.consStart]].sort((a, b) => a[1] - b[1]);
+    let cur = ph[0][0];
+    for (const [k, s] of ph) if (age >= s) cur = k;
+    return cur;
+  }
+  const rateOf = (p, age) => ({ aggr: p.rAggr, norm: p.rNorm, cons: p.rCons })[phaseOf(p, age)];
   function accumulate(p) {
     const rows = [];
     let bal = p.current || 0;
     let salary = p.salary;
-    const consFrom = p.retireAge - p.consYears;      // H5
-    const aggrUntil = p.startAge + p.consYears * 2;  // H6
     for (let age = p.startAge; age < p.retireAge; age++) {
       if (age > p.startAge) salary *= 1 + p.raise;
       const saving = age >= p.saveStart && age < p.saveEnd;
       const mine = saving ? salary * p.myPct : 0;
       const match = saving ? salary * Math.min(p.myPct, p.matchPct) : 0; // match only on what you put in, up to the cap
-      let rate = age >= consFrom ? p.rCons : age < aggrUntil ? p.rAggr : p.rNorm;
+      let rate = rateOf(p, age);
       if (p.lossAge === age) rate = -p.lossPct; // market-loss scenario: that year's return is replaced by a loss
       const growth = bal * rate;
       bal = bal + mine + match + growth;
@@ -227,7 +239,7 @@ const Engine = (() => {
     return { all, skipFirst, skipLast };
   }
   function lossTiming(p, lossPct) {
-    const base = { ...p, saveStart: p.startAge, saveEnd: p.retireAge };
+    const base = { ...p, saveStart: p.startAge, saveEnd: p.retireAge, lossAge: null };
     const bench = accumulate(base).final;
     const byAge = [];
     for (let a = p.startAge + 1; a < p.retireAge; a++) {
@@ -248,7 +260,7 @@ const Engine = (() => {
       roth: fv(c.amount),
     };
   }
-  return { accumulate, distribute, savingTiming, lossTiming, rothVsTrad };
+  return { phaseOf, accumulate, distribute, savingTiming, lossTiming, rothVsTrad };
 })();
 
 
@@ -257,9 +269,9 @@ const Engine = (() => {
 (() => {
 // ---------------- defaults (from NFI_EB_Presentation.xlsx) ----------------
 const DEFAULTS = {
-  salary: 45000, raise: 0.02, startAge: 25, retireAge: 64, saveStart: 28, saveEnd: 67,
-  myPct: 0.08, matchPct: 0.05, current: 0, tax: 0.18,
-  rAggr: 0.12, rNorm: 0.10, rCons: 0.08, consYears: 5,
+  salary: 60000, raise: 0.02, startAge: 25, retireAge: 64, saveStart: 28, saveEnd: 67,
+  myPct: 0.05, matchPct: 0.05, current: 0, tax: 0.18,
+  rAggr: 0.12, rNorm: 0.10, rCons: 0.08, aggrStart: 25, normStart: 35, consStart: 59,
   needPct: 0.75, inflation: 0.07, rRet: 0.03, lifeExp: 92,
   ssOn: true, ssMonthly: 4900, cola: 0.024, otherMonthly: 0, otherGrowth: 0.02,
 };
@@ -278,10 +290,12 @@ const FIELDS = {
   matchPct: { label: 'Employer match limit', min: 0, max: 0.1, step: 0.005, kind: 'pct', hint: 'Matched dollar-for-dollar up to this % of salary' },
   current: { label: 'Savings you already have', min: 0, max: 200000, step: 1000, kind: 'money' },
   tax: { label: 'Income tax rate', min: 0, max: 0.4, step: 0.01, kind: 'pct' },
-  rAggr: { label: 'Aggressive return (early career)', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
-  rNorm: { label: 'Normal return (mid career)', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
-  rCons: { label: 'Conservative return (near retirement)', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
-  consYears: { label: 'Conservative years before retiring', min: 0, max: 15, step: 1, kind: 'years', hint: 'Aggressive period lasts twice as long, from your starting age' },
+  aggrStart: { label: 'Aggressive phase starts at', min: 18, max: 75, step: 1, kind: 'age' },
+  rAggr: { label: 'Aggressive return', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
+  normStart: { label: 'Normal phase starts at', min: 18, max: 75, step: 1, kind: 'age' },
+  rNorm: { label: 'Normal return', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
+  consStart: { label: 'Conservative phase starts at', min: 18, max: 75, step: 1, kind: 'age' },
+  rCons: { label: 'Conservative return', min: 0, max: 0.15, step: 0.005, kind: 'pct' },
   needPct: { label: 'Income needed in retirement', min: 0.4, max: 1, step: 0.05, kind: 'pct', hint: '% of your final salary' },
   inflation: { label: 'Inflation in retirement', min: 0, max: 0.1, step: 0.005, kind: 'pct', hint: 'Workbook uses 7% to cover rising health-care costs' },
   rRet: { label: 'Return during retirement', min: 0, max: 0.1, step: 0.005, kind: 'pct' },
@@ -294,6 +308,7 @@ const FIELDS = {
   // lesson-only
   earlyStart: { label: 'Early saver starts at', min: 18, max: 50, step: 1, kind: 'age' },
   lateStart: { label: 'Late saver starts at', min: 18, max: 55, step: 1, kind: 'age' },
+  lossAge: { label: 'Drop happens at age', min: 18, max: 75, step: 1, kind: 'age' },
   lossPct: { label: 'Size of the market drop', min: 0.05, max: 0.4, step: 0.05, kind: 'pct' },
   amount: { label: 'Yearly IRA contribution', min: 500, max: 7500, step: 100, kind: 'money' },
   taxNow: { label: 'Your tax rate today', min: 0, max: 0.45, step: 0.005, kind: 'pct' },
@@ -434,21 +449,24 @@ function bindQuiz(root, qs) {
 // ---------------- lesson steps ----------------
 const STEPS = [
   {
-    short: 'Meet Alex', title: 'Meet Alex: how a 401(k) grows',
-    init: () => clone(DEFAULTS),
-    intro: () => `<p>Alex is <strong>25</strong> and just started a job paying <strong>$45,000</strong>, with 2% raises each year. At <strong>28</strong>, Alex starts putting <strong>8%</strong> of each paycheck into a 401(k), and the employer adds <strong>5%</strong>. Alex keeps saving until retiring at <strong>64</strong>.</p>
-      <p>The money is invested: aggressively early on (12% a year in this example), normally in mid-career (10%), and conservatively in the last 5 years (8%). These return rates come from the workbook and are on the optimistic side.</p>`,
-    keys: ['salary', 'myPct'],
+    short: 'Meet Sycamore Sam', title: 'Meet Sycamore Sam: how a 401(k) grows',
+    init: () => ({ ...clone(DEFAULTS), saveEnd: 100 }),
+    intro: () => `<p>Set up Sycamore Sam’s career and savings plan with the sliders below. Changes here carry over to Steps 2 to 5.</p>
+      <p>Sam’s money follows a <strong>lifecycle investment strategy</strong>: aggressive early on, normal in mid-career, and conservative near retirement. Choose the age each phase starts and the yearly return it earns. The workbook’s return rates are on the optimistic side.</p>`,
+    groups: [
+      { title: 'Career and saving', keys: ['salary', 'raise', 'myPct', 'matchPct', 'tax', 'startAge', 'saveStart', 'retireAge'] },
+      { title: 'Lifecycle investment strategy', phases: true },
+    ],
     body: st => {
       const a = Engine.accumulate(st);
       return `<div class="kpis">
         <div class="kpi hero"><div class="k">Balance at retirement (${st.retireAge})</div><div class="v">${money(a.final)}</div></div>
-        <div class="kpi"><div class="k"><span class="swatch" style="background:var(--s1)"></span>Alex put in</div><div class="v sm">${money(a.totalMine)}</div><div class="sub">${pct(a.totalMine / a.final)} of the total</div></div>
+        <div class="kpi"><div class="k"><span class="swatch" style="background:var(--s1)"></span>Sam put in</div><div class="v sm">${money(a.totalMine)}</div><div class="sub">${pct(a.totalMine / a.final)} of the total</div></div>
         <div class="kpi"><div class="k"><span class="swatch" style="background:var(--s2)"></span>Employer added</div><div class="v sm">${money(a.totalMatch)}</div><div class="sub">${pct(a.totalMatch / a.final)} of the total</div></div>
         <div class="kpi"><div class="k"><span class="swatch" style="background:var(--s3)"></span>Investment growth</div><div class="v sm">${money(a.totalGrowth)}</div><div class="sub">${pct(a.totalGrowth / a.final)} of the total</div></div>
       </div>
-      <div class="card chart-card"><h3>Where Alex's balance comes from</h3><p class="cap">Running totals by age. Growth is the return earned on money already saved.</p>
-      ${legend([['--s1', 'Alex’s contributions'], ['--s2', 'Employer match'], ['--s3', 'Investment growth']])}
+      <div class="card chart-card"><h3>Where Sam's balance comes from</h3><p class="cap">Running totals by age. Growth is the return earned on money already saved.</p>
+      ${legend([['--s1', 'Sam’s contributions'], ['--s2', 'Employer match'], ['--s3', 'Investment growth']])}
       <div class="chart-box"><canvas id="ch1" role="img" aria-label="Stacked area chart of contributions, match and growth by age"></canvas></div></div>`;
     },
     draw: st => {
@@ -457,30 +475,31 @@ const STEPS = [
       a.rows.forEach(r => { m += r.mine; e += r.match; g += r.growth; M.push(m); E.push(e); G.push(g); L.push(r.age + 1); });
       const o = baseOpts({ xTitle: 'Age', stacked: true });
       draw('ch1', { type: 'line', data: { labels: L, datasets: [
-        lineDs('Alex’s contributions', M, t.s1, { fill: true, backgroundColor: t.s1 + 'cc' }),
+        lineDs('Sam’s contributions', M, t.s1, { fill: true, backgroundColor: t.s1 + 'cc' }),
         lineDs('Employer match', E, t.s2, { fill: true, backgroundColor: t.s2 + 'cc' }),
         lineDs('Investment growth', G, t.s3, { fill: true, backgroundColor: t.s3 + 'cc' }),
       ] }, options: o });
     },
-    discuss: ['Alex’s own deposits are a small slice of the final balance. Where did the rest come from?',
-      'What makes it hard for a 25-year-old to save 8% of pay? What could make it easier?',
+    discuss: ['Sam’s own deposits are a small slice of the final balance. Where did the rest come from?',
+      'What makes it hard for a 25-year-old to save part of every paycheck? What could make it easier?',
       'Why does the curve stay flat for years, then shoot up?'],
     quiz: st => {
       const a = Engine.accumulate(st), share = a.totalGrowth / a.final;
       const opts = ['Less than 25%', '25% to 50%', '50% to 75%', 'More than 75%'];
       return [
-        { q: 'In Alex’s plan, roughly what share of the final balance comes from investment growth rather than deposits?', opts, a: share < .25 ? 0 : share < .5 ? 1 : share < .75 ? 2 : 3,
-          why: `Growth is about ${pct(share)} of Alex’s balance. Returns earn their own returns, and given enough years that becomes the biggest source.` },
-        { q: 'Why does the balance grow faster in the later years?', opts: ['Alex’s raises get much bigger', 'Returns are earned on a growing pile, including past returns (compounding)', 'The employer match increases with age', 'Taxes go away after 50'], a: 1,
-          why: 'Raises are only 2% a year. The acceleration comes from compounding: each year’s return is earned on everything saved and earned so far.' },
+        { q: 'In Sam’s plan, roughly what share of the final balance comes from investment growth rather than deposits?', opts, a: share < .25 ? 0 : share < .5 ? 1 : share < .75 ? 2 : 3,
+          why: `Growth is about ${pct(share)} of Sam’s balance. Returns earn their own returns, and given enough years that becomes the biggest source.` },
+        { q: 'Why does the balance grow faster in the later years?', opts: ['Sam’s raises get much bigger', 'Returns are earned on a growing pile, including past returns (compounding)', 'The employer match increases with age', 'Taxes go away after 50'], a: 1,
+          why: `Raises are only ${pct(st.raise)} a year. The acceleration comes from compounding: each year’s return is earned on everything saved and earned so far.` },
       ];
     },
   },
   {
     short: 'Free money', title: 'The employer match is free money',
-    init: () => clone(DEFAULTS),
-    intro: () => `<p>Many employers match what you put in, but <strong>only if you contribute</strong>. In this lab the employer matches dollar for dollar up to a limit (5% of salary). Contribute less than the limit and you leave free money on the table.</p>
-      <p>Saving also costs less than it looks. 401(k) contributions come out <strong>before income tax</strong>, so with an 18% tax rate, each $1 you save lowers your take-home pay by only about 82¢.</p>`,
+    init: () => ({ ...clone(DEFAULTS), saveEnd: 100 }),
+    linkFrom: 0,
+    intro: () => `<p>Many employers match what you put in, but <strong>only if you contribute</strong>. In this lab the employer matches dollar for dollar up to a limit (a % of salary). Contribute less than the limit and you leave free money on the table.</p>
+      <p>Saving also costs less than it looks. 401(k) contributions come out <strong>before income tax</strong>. For example, with an 18% tax rate, each $1 you save lowers your take-home pay by only about 82¢.</p>`,
     keys: ['myPct', 'matchPct', 'tax'],
     body: st => {
       const a = Engine.accumulate(st);
@@ -515,7 +534,8 @@ const STEPS = [
   },
   {
     short: 'Cost of waiting', title: 'The cost of waiting',
-    init: () => ({ ...clone(DEFAULTS), earlyStart: 25, lateStart: 35 }),
+    init: () => ({ ...clone(DEFAULTS), saveEnd: 100, earlyStart: 25, lateStart: 35 }),
+    linkFrom: 0,
     intro: () => `<p>Two people have the same job, salary, and savings rate. The only difference is <strong>when they start saving</strong>. Move the sliders to see what waiting costs.</p>`,
     keys: ['earlyStart', 'lateStart', 'myPct'],
     body: st => {
@@ -561,36 +581,41 @@ const STEPS = [
   },
   {
     short: 'Market drops', title: 'When the market drops',
-    init: () => ({ ...clone(DEFAULTS), saveStart: DEFAULTS.startAge, lossPct: 0.2 }),
-    intro: () => `<p>Markets fall from time to time. Here Alex saves every year from 25, and in <strong>one</strong> year the normal return is replaced by a loss. The chart shows how much less Alex has at retirement, depending on the age when the drop hits.</p>
-      <p>The colors show Alex’s investment mix at that age. That is why the plan moves to <strong>safer investments</strong> in the final years.</p>`,
-    keys: ['lossPct', 'consYears'],
+    init: () => ({ ...clone(DEFAULTS), saveEnd: 100, lossPct: 0.2, lossAge: 60 }),
+    linkFrom: 0,
+    intro: st => `<p>Markets fall from time to time. Here Sycamore Sam saves every year from ${st.startAge}, and in <strong>one</strong> year the normal return is replaced by a loss. Pick the size of the drop and the age when it happens. The chart shows how much less Sam has at retirement for a drop at every age.</p>
+      <p>The colors show Sam’s investment phase at that age. That is why the plan moves to <strong>safer investments</strong> in the final years.</p>`,
+    keys: ['lossPct', 'lossAge'],
     body: st => {
       const lt = Engine.lossTiming(st, st.lossPct);
       const worst = lt.byAge.reduce((w, x) => x.final < w.final ? x : w, lt.byAge[0]);
-      const at = a => (lt.byAge.find(x => x.age === a) || { final: lt.bench }).final;
+      const hit = lt.byAge.find(x => x.age === st.lossAge);
+      const first = lt.byAge.length ? lt.byAge[0].age : st.startAge, last = st.retireAge - 1;
+      const ph = { aggr: 'aggressive', norm: 'normal', cons: 'conservative' }[Engine.phaseOf(st, st.lossAge)];
       return `<div class="kpis">
         <div class="kpi"><div class="k">No drop (benchmark)</div><div class="v">${money(lt.bench)}</div></div>
-        <div class="kpi"><div class="k">${pct(st.lossPct)} drop at age 30 costs</div><div class="v sm">${money(lt.bench - at(30))}</div><div class="sub">${pct(1 - at(30) / lt.bench)} less at retirement</div></div>
-        <div class="kpi hero"><div class="k">${pct(st.lossPct)} drop at age ${st.retireAge - 1} costs</div><div class="v sm">${money(lt.bench - at(st.retireAge - 1))}</div><div class="sub">${pct(1 - at(st.retireAge - 1) / lt.bench)} less at retirement</div></div>
+        <div class="kpi hero"><div class="k">${pct(st.lossPct)} drop at age ${st.lossAge} costs</div>${hit
+          ? `<div class="v">${money(lt.bench - hit.final)}</div><div class="sub">${pct(Math.round((1 - hit.final / lt.bench) * 1000) / 1000)} less at retirement · ${ph} phase</div>`
+          : `<div class="v sm">No effect</div><div class="sub">Pick an age from ${first} to ${last}, while Sam is investing</div>`}</div>
+        <div class="kpi"><div class="k">Balance at retirement after the drop</div><div class="v sm">${money(hit ? hit.final : lt.bench)}</div></div>
         <div class="kpi"><div class="k">Most costly age</div><div class="v sm">${worst ? worst.age : '–'}</div><div class="sub">${worst ? money(lt.bench - worst.final) + ' lost' : ''}</div></div>
       </div>
-      <div class="card chart-card"><h3>Cost of a ${pct(st.lossPct)} drop, by Alex’s age when it happens</h3><p class="cap">How much smaller the balance is at retirement than with no drop.</p>
-      ${legend([['--s1', 'Aggressive years (' + pct(st.rAggr) + ' normal return)'], ['--s2', 'Normal years (' + pct(st.rNorm) + ')'], ['--s3', 'Conservative years (' + pct(st.rCons) + ')']])}
+      <div class="card chart-card"><h3>Cost of a ${pct(st.lossPct)} drop, by Sam’s age when it happens</h3><p class="cap">How much smaller the balance is at retirement than with no drop. The outlined bar is age ${st.lossAge}.</p>
+      ${legend([['--s1', 'Aggressive phase (' + pct(st.rAggr) + ' normal return)'], ['--s2', 'Normal phase (' + pct(st.rNorm) + ')'], ['--s3', 'Conservative phase (' + pct(st.rCons) + ')']])}
       <div class="chart-box"><canvas id="ch4" role="img" aria-label="Bar chart of the cost of a market drop by age"></canvas></div></div>`;
     },
     draw: st => {
       const t = theme(), lt = Engine.lossTiming(st, st.lossPct);
-      const consFrom = st.retireAge - st.consYears, aggrUntil = st.startAge + st.consYears * 2;
-      const col = a => a >= consFrom ? t.s3 : a < aggrUntil ? t.s1 : t.s2;
-      draw('ch4', { type: 'bar', data: { labels: lt.byAge.map(x => x.age), datasets: [barDs('Lost at retirement', lt.byAge.map(x => lt.bench - x.final), lt.byAge.map(x => col(x.age)))] },
+      const col = a => ({ aggr: t.s1, norm: t.s2, cons: t.s3 })[Engine.phaseOf(st, a)];
+      draw('ch4', { type: 'bar', data: { labels: lt.byAge.map(x => x.age), datasets: [barDs('Lost at retirement', lt.byAge.map(x => lt.bench - x.final), lt.byAge.map(x => col(x.age)), {
+        borderColor: lt.byAge.map(x => x.age === st.lossAge ? t.ink : 'transparent'), borderWidth: lt.byAge.map(x => x.age === st.lossAge ? 2 : 0), borderSkipped: false })] },
         options: baseOpts({ xTitle: 'Age when the drop happens' }) });
     },
     discuss: ['If the market fell 20% the year before you planned to retire, what could you do? (Work longer? Spend less?)',
       'Why can a young investor afford to take more risk?',
       'Does a drop at 30 really “cost nothing”? What would make a young investor sell at the bottom, and why would that hurt?'],
     quiz: () => [
-      { q: 'The same 20% drop hits Alex’s account. When does it cost the most dollars at retirement?', opts: ['In the first few years of saving', 'In the middle of the career', 'In the last decade before retiring', 'It costs the same at any age'], a: 2,
+      { q: 'The same 20% drop hits Sam’s account. When does it cost the most dollars at retirement?', opts: ['In the first few years of saving', 'In the middle of the career', 'In the last decade before retiring', 'It costs the same at any age'], a: 2,
         why: 'Near retirement the balance is largest, so the same % drop wipes out the most dollars, and there is little time left to recover.' },
       { q: 'Why do many plans shift to safer investments in the last years before retirement?', opts: ['Safer investments always earn more', 'There is less time to recover from a big loss on a large balance', 'The law requires it at 59½', 'Employers stop matching'], a: 1,
         why: 'Safer investments usually earn less, but they reduce the chance that a crash right before retirement derails the plan.' },
@@ -598,8 +623,9 @@ const STEPS = [
   },
   {
     short: 'Will it last?', title: 'Retirement years: will the money last?',
-    init: () => clone(DEFAULTS),
-    intro: () => `<p>At retirement Alex stops working and starts living on savings. Alex wants <strong>75%</strong> of final salary each year, and that amount rises with inflation (7% here, set high for health-care costs). Social Security covers part of it; the rest is withdrawn from the 401(k), which now earns a cautious <strong>3%</strong>.</p>
+    init: () => ({ ...clone(DEFAULTS), saveEnd: 100 }),
+    linkFrom: 0,
+    intro: () => `<p>At retirement Sycamore Sam retires and lives on savings. Sycamore Sam wants <strong>75%</strong> income replacement at retirement, and that amount rises with inflation. Social Security covers part of it; the rest is withdrawn from the 401(k), which now earns a cautious <strong>3%</strong>.</p>
       <p>Turn Social Security on or off to see a plan with or without it.</p>`,
     keys: ['retireAge', 'needPct', 'inflation', 'lifeExp', 'ssOn', 'ssMonthly', 'rRet'],
     body: st => {
@@ -631,7 +657,7 @@ const STEPS = [
       'How long should you plan for? What happens to the plan if you live to 100?',
       'Social Security may change before you retire. How would you plan with and without it?'],
     quiz: () => [
-      { q: 'Alex’s yearly withdrawal keeps growing even though Alex’s lifestyle stays the same. Why?', opts: ['The 401(k) charges higher fees with age', 'Inflation makes the same lifestyle cost more each year', 'Social Security shrinks each year', 'Taxes rise automatically at 70'], a: 1,
+      { q: 'Sam’s yearly withdrawal keeps growing even though Sam’s lifestyle stays the same. Why?', opts: ['The 401(k) charges higher fees with age', 'Inflation makes the same lifestyle cost more each year', 'Social Security shrinks each year', 'Taxes rise automatically at 70'], a: 1,
         why: 'The income need grows with inflation each year. Social Security grows too (COLA), but more slowly, so savings fill a bigger gap.' },
       { q: 'Which change helps the savings last longer?', opts: ['Retiring a few years later', 'Higher inflation', 'Needing a larger share of salary', 'A lower return during retirement'], a: 0,
         why: 'Working longer adds years of saving and growth and leaves fewer years to fund. Try it with the retirement age slider.' },
@@ -703,7 +729,7 @@ const STEPS = [
 const S = {
   mode: 'lesson', step: 0,
   stepState: STEPS.map(s => s.init()),
-  sb: { A: clone(DEFAULTS), B: { ...clone(DEFAULTS), saveStart: 35 }, bOn: true, active: 'A', tab: 'life', lossPct: 0.2, roth: clone(ROTH) },
+  sb: { A: clone(DEFAULTS), B: { ...clone(DEFAULTS), saveStart: 35 }, bOn: true, active: 'A', tab: 'life', lossPct: 0.2, lossAge: 60, roth: clone(ROTH) },
 };
 try { const h = location.hash.replace('#', ''); if (h === 'sandbox') S.mode = 'sandbox'; } catch (e) {}
 const app = document.getElementById('app');
@@ -725,15 +751,28 @@ document.getElementById('bigtext').onclick = e => {
 function render() { app.className = S.mode; Object.keys(charts).forEach(k => { charts[k].destroy(); delete charts[k]; }); S.mode === 'lesson' ? renderLesson() : renderSandbox(); }
 
 // ---------------- lesson view ----------------
+// Values Step 1 passes on (one way) to every step with linkFrom: 0
+const SHARED = ['salary', 'raise', 'myPct', 'matchPct', 'tax', 'startAge', 'saveStart', 'saveEnd', 'retireAge', 'aggrStart', 'rAggr', 'normStart', 'rNorm', 'consStart', 'rCons'];
+const pick = (o, keys) => Object.fromEntries(keys.map(k => [k, o[k]]));
+const PHASES = [['Aggressive', 'aggrStart', 'rAggr', '--s1'], ['Normal', 'normStart', 'rNorm', '--s2'], ['Conservative', 'consStart', 'rCons', '--s3']];
+function ctlHTML(step, st) {
+  if (!step.groups) return `<div class="controls">${step.keys.map(k => control(k, st)).join('')}</div>`;
+  return step.groups.map(g => `<h3 class="ctl-group">${g.title}</h3>` + (g.phases
+    ? `<div class="phase-grid">${PHASES.map(([n, a, r, c]) => `<div class="phase"><h4><span class="swatch" style="background:var(${c})"></span>${n}</h4>${control(a, st)}${control(r, st)}</div>`).join('')}</div>
+       <p class="note" style="margin:8px 0 0">Each phase lasts until the next one starts. Phases can come in any order.</p>`
+    : `<div class="controls">${g.keys.map(k => control(k, st)).join('')}</div>`)).join('');
+}
 function renderLesson() {
   const i = S.step, step = STEPS[i], st = S.stepState[i];
   const qs = step.quiz(st);
+  const hasCtl = step.groups || (step.keys && step.keys.length);
   app.innerHTML = `<div class="layout">
     <nav class="rail" aria-label="Lesson steps">${STEPS.map((s, j) => `<button type="button" data-step="${j}" ${j === i ? 'aria-current="step"' : ''}><span class="n">${j + 1}</span>${s.short}</button>`).join('')}</nav>
     <section class="stage">
       <div class="card lesson-head"><div class="eyebrow">Step ${i + 1} of ${STEPS.length}</div><h2>${step.title}</h2>${step.intro(st)}</div>
-      ${step.keys.length ? `<div class="card" id="ctls"><div class="controls">${step.keys.map(k => control(k, st)).join('')}</div>
-        <div style="margin-top:12px"><button type="button" class="ghost" id="reset-step">Reset this step</button></div></div>` : ''}
+      ${hasCtl ? `<div class="card" id="ctls">${ctlHTML(step, st)}
+        <div style="margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:12px"><button type="button" class="ghost" id="reset-step">${step.linkFrom !== undefined ? 'Reset to Step 1 values' : 'Reset this step'}</button>
+        ${step.linkFrom !== undefined ? '<span class="note">Sam’s salary, raises, contribution, match, tax rate, ages and investment strategy come from Step 1. Changes made here stay on this step.</span>' : ''}</div></div>` : ''}
       <div id="out" class="stage">${step.body(st)}</div>
       <div class="two">
         <div class="card discuss"><h3>Discuss</h3><ul>${step.discuss.map(d => `<li>${d}</li>`).join('')}</ul></div>
@@ -749,9 +788,14 @@ function renderLesson() {
   const next = document.getElementById('next'); if (next) next.onclick = () => { S.step++; render(); window.scrollTo(0, 0); };
   const n2 = document.getElementById('next2'); if (n2) n2.onclick = () => setMode('sandbox');
   const gs = document.getElementById('go-sandbox'); if (gs) gs.onclick = () => setMode('sandbox');
-  const rs = document.getElementById('reset-step'); if (rs) rs.onclick = () => { S.stepState[i] = step.init(); render(); };
+  const rs = document.getElementById('reset-step'); if (rs) rs.onclick = () => {
+    S.stepState[i] = step.linkFrom !== undefined ? { ...step.init(), ...pick(S.stepState[step.linkFrom], SHARED) } : step.init();
+    STEPS.forEach((s2, j) => { if (s2.linkFrom === i) Object.assign(S.stepState[j], pick(S.stepState[i], SHARED)); });
+    render();
+  };
   const ctls = document.getElementById('ctls');
-  if (ctls) bindControls(ctls, () => S.stepState[S.step], () => { document.getElementById('out').innerHTML = step.body(S.stepState[S.step]); step.draw(S.stepState[S.step]); });
+  if (ctls) bindControls(ctls, () => S.stepState[S.step], key => {
+    if (SHARED.includes(key)) STEPS.forEach((s2, j) => { if (s2.linkFrom === S.step) S.stepState[j][key] = S.stepState[S.step][key]; }); document.getElementById('out').innerHTML = step.body(S.stepState[S.step]); step.draw(S.stepState[S.step]); });
   bindQuiz(document.getElementById('quizbox'), qs);
   step.draw(st);
 }
@@ -759,7 +803,7 @@ function renderLesson() {
 // ---------------- sandbox view ----------------
 const GROUPS = [
   ['Career and saving', ['salary', 'raise', 'startAge', 'retireAge', 'saveStart', 'saveEnd', 'myPct', 'matchPct', 'current', 'tax']],
-  ['Investment returns', ['rAggr', 'rNorm', 'rCons', 'consYears']],
+  ['Lifecycle investment strategy', ['aggrStart', 'rAggr', 'normStart', 'rNorm', 'consStart', 'rCons']],
   ['Retirement years', ['needPct', 'inflation', 'rRet', 'lifeExp', 'ssOn', 'ssMonthly', 'cola', 'otherMonthly', 'otherGrowth']],
 ];
 function renderSandbox() {
@@ -874,7 +918,7 @@ function renderCompare(box, p, actLabel) {
         <table style="margin-top:10px"><thead><tr><th></th><th>You contributed</th><th>At retirement</th></tr></thead><tbody>
         ${[['Save every year', tm.all], ['Skip first 5 years', tm.skipFirst], ['Skip last 5 years', tm.skipLast]].map(([l, a]) => `<tr><td>${l}</td><td>${money(a.totalMine)}</td><td>${money(a.final)}</td></tr>`).join('')}</tbody></table></div>
       <div class="card chart-card"><h3>Timing of a market drop</h3><p class="cap">Saving every year; one year’s return replaced by a loss.</p>
-        <div id="lossctl">${control('lossPct', sb)}</div>
+        <div id="lossctl" class="controls">${control('lossPct', sb)}${control('lossAge', sb)}</div>
         <div id="lossout"></div></div>
     </div>
     <div class="card chart-card" style="margin-top:18px"><h3>Traditional vs Roth IRA</h3><p class="cap">Simplified: one flat tax rate now and one in retirement.</p>
@@ -884,12 +928,12 @@ function renderCompare(box, p, actLabel) {
   const drawLoss = () => {
     const lt = Engine.lossTiming(p, sb.lossPct), t = theme();
     const at = a => (lt.byAge.find(x => x.age === a) || { final: lt.bench }).final;
-    const ages = [30, 45, 58, p.retireAge - 1].filter((a, i, arr) => a > p.startAge && a < p.retireAge && arr.indexOf(a) === i);
+    const ages = [sb.lossAge, 30, 45, 58, p.retireAge - 1].filter((a, i, arr) => a > p.startAge && a < p.retireAge && arr.indexOf(a) === i);
     document.getElementById('lossout').innerHTML = `<table><thead><tr><th>Drop at age</th><th>At retirement</th><th>vs no drop</th></tr></thead><tbody>
       <tr><td>No drop</td><td>${money(lt.bench)}</td><td>100%</td></tr>
-      ${ages.map(a => `<tr><td>${a}</td><td>${money(at(a))}</td><td>${pct(Math.round(at(a) / lt.bench * 1000) / 1000)}</td></tr>`).join('')}</tbody></table>
+      ${ages.map(a => `<tr${a === sb.lossAge ? ' style="font-weight:700"' : ''}><td>${a}${a === sb.lossAge ? ' (your pick)' : ''}</td><td>${money(at(a))}</td><td>${pct(Math.round(at(a) / lt.bench * 1000) / 1000)}</td></tr>`).join('')}</tbody></table>
       <div class="chart-box" style="height:180px;margin-top:10px"><canvas id="cmp2" role="img" aria-label="Cost of drop by age"></canvas></div>`;
-    draw('cmp2', { type: 'bar', data: { labels: lt.byAge.map(x => x.age), datasets: [barDs('Lost at retirement', lt.byAge.map(x => lt.bench - x.final), t.s1)] }, options: baseOpts({ xTitle: 'Age when the drop happens' }) });
+    draw('cmp2', { type: 'bar', data: { labels: lt.byAge.map(x => x.age), datasets: [barDs('Lost at retirement', lt.byAge.map(x => lt.bench - x.final), lt.byAge.map(x => x.age === sb.lossAge ? t.s2 : t.s1))] }, options: baseOpts({ xTitle: 'Age when the drop happens' }) });
   };
   const drawRoth = () => {
     const x = Engine.rothVsTrad(sb.roth);
